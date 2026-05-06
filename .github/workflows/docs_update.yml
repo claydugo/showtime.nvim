@@ -1,0 +1,38 @@
+name: Generate documentation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'README.md'
+      - 'lua/**'
+      - 'plugin/**'
+
+permissions:
+  contents: write
+
+jobs:
+  generate-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Generate Vim documentation
+        uses: kdheepak/panvimdoc@main
+        with:
+          vimdoc: showtime
+          pandoc: "README.md"
+          description: "Treesitter-powered reference highlighter for Neovim"
+          toc: true
+          demojify: true
+
+      - name: Commit and push changes
+        uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: 'auto generate vimdoc'
+          branch: ${{ github.ref }}
+          file_pattern: doc/showtime.txt
+          commit_user_name: 'github-actions[bot]'
+          commit_user_email: 'github-actions[bot]@users.noreply.github.com'
