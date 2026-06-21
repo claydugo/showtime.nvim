@@ -17,6 +17,23 @@ vim.api.nvim_create_user_command("ShowtimeToggle", function()
     require("showtime").toggle()
 end, { desc = "Toggle showtime reference highlighting" })
 
+vim.api.nvim_create_user_command("ShowtimeNextReference", function()
+    require("showtime").next_reference()
+end, { desc = "Jump to the next reference in scope" })
+
+vim.api.nvim_create_user_command("ShowtimePrevReference", function()
+    require("showtime").prev_reference()
+end, { desc = "Jump to the previous reference in scope" })
+
+-- No default keymaps. Bind these <Plug> mappings yourself if you want motions.
+vim.keymap.set("n", "<Plug>(showtime-next-reference)", function()
+    require("showtime").next_reference()
+end, { desc = "Jump to the next reference in scope" })
+
+vim.keymap.set("n", "<Plug>(showtime-prev-reference)", function()
+    require("showtime").prev_reference()
+end, { desc = "Jump to the previous reference in scope" })
+
 local group = vim.api.nvim_create_augroup("showtime", { clear = true })
 
 vim.api.nvim_create_autocmd("CursorMoved", {

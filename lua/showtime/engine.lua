@@ -106,35 +106,35 @@ local GENERIC_SCOPE_PATTERNS = {
 --- one of these AND it has zero children (leaf node).
 local IDENTIFIER_PATTERNS = { "identifier", "name" }
 
---- @class showtime.Cache
---- @field bufnr number
---- @field changedtick number
---- @field node_text string
---- @field node_type string
---- @field cursor_row number
---- @field cursor_col number
---- @field scope_sr number
---- @field scope_sc number
---- @field scope_er number
---- @field scope_ec number
---- @field top number
---- @field bot number
+---@class showtime.Cache
+---@field bufnr number
+---@field changedtick number
+---@field node_text string
+---@field node_type string
+---@field cursor_row number
+---@field cursor_col number
+---@field scope_sr number
+---@field scope_sc number
+---@field scope_er number
+---@field scope_ec number
+---@field top number
+---@field bot number
 
 --- Per-window cache, keyed by winid.
---- @type table<number, showtime.Cache>
+---@type table<number, showtime.Cache>
 local cache = {}
 
 --- Per-buffer tracking of whether extmarks are active.
---- @type table<number, boolean>
+---@type table<number, boolean>
 local active = {}
 
 --- Effective scope node tables (builtins merged with user config).
---- @type table<string, table<string, boolean>>
+---@type table<string, table<string, boolean>>
 local effective_scope_nodes = vim.deepcopy(BUILTIN_SCOPE_NODES)
 
 --- Rebuild effective scope tables from builtins + user config.
 --- Called once from setup(), not on the hot path.
---- @param user_scope_nodes table<string, table<string, boolean>>?
+---@param user_scope_nodes table<string, table<string, boolean>>?
 function M._rebuild_scope_nodes(user_scope_nodes)
     if user_scope_nodes then
         effective_scope_nodes = vim.tbl_deep_extend("force", vim.deepcopy(BUILTIN_SCOPE_NODES), user_scope_nodes)
@@ -144,7 +144,7 @@ function M._rebuild_scope_nodes(user_scope_nodes)
 end
 
 --- Clear highlights for a buffer if it has active extmarks.
---- @param bufnr number
+---@param bufnr number
 local function clear_if_active(bufnr)
     if active[bufnr] then
         M.clear(bufnr)
@@ -152,8 +152,8 @@ local function clear_if_active(bufnr)
 end
 
 --- Check whether a treesitter node represents an identifier.
---- @param node TSNode
---- @return boolean
+---@param node TSNode
+---@return boolean
 local function is_identifier(node)
     if node:child_count() > 0 then
         return false
@@ -169,9 +169,9 @@ end
 
 --- Walk up the tree to find the nearest scope boundary.
 --- Falls back to the tree root.
---- @param node TSNode
---- @param lang string Treesitter language name
---- @return TSNode
+---@param node TSNode
+---@param lang string Treesitter language name
+---@return TSNode
 local function find_scope(node, lang)
     local scope_set = effective_scope_nodes[lang]
     local root = node
@@ -200,14 +200,14 @@ end
 
 --- Iterative DFS over scope descendants. Collects matching nodes that
 --- overlap the visible viewport. Prunes entire subtrees outside viewport.
---- @param scope TSNode
---- @param text string
---- @param ntype string
---- @param bufnr number
---- @param top number 0-indexed first visible line
---- @param bot number 0-indexed last visible line
---- @param max number
---- @return number[][] List of {start_row, start_col, end_row, end_col}
+---@param scope TSNode
+---@param text string
+---@param ntype string
+---@param bufnr number
+---@param top number 0-indexed first visible line
+---@param bot number 0-indexed last visible line
+---@param max number
+---@return number[][] List of {start_row, start_col, end_row, end_col}
 local function find_matches(scope, text, ntype, bufnr, top, bot, max)
     local matches = {}
     local stack = { scope }
@@ -242,15 +242,85 @@ local function find_matches(scope, text, ntype, bufnr, top, bot, max)
     return matches
 end
 
+--- Resolve the identifier under the cursor and its enclosing scope, parsing the
+--- whole buffer. Navigation needs matches outside the viewport, so unlike the
+--- highlight path this does not prune to visible lines.
+---@param bufnr number
+---@param winid number
+---@return TSNode? scope
+---@return string? node_text
+---@return string? node_type
+---@return number? cursor_row 0-indexed start row of the cursor's identifier
+---@return number? cursor_col 0-indexed start col of the cursor's identifier
+local function resolve_identifier(bufnr, winid)
+    local ok, parser = pcall(vim.treesitter.get_parser, bufnr)
+    if not ok or not parser then
+        return nil
+    end
+    parser:parse(true)
+
+    local cursor = vim.api.nvim_win_get_cursor(winid)
+    local node = vim.treesitter.get_node({
+        bufnr = bufnr,
+        pos = { cursor[1] - 1, cursor[2] },
+        ignore_injections = false,
+    })
+    if not node or not is_identifier(node) then
+        return nil
+    end
+
+    local node_text = vim.treesitter.get_node_text(node, bufnr)
+    if not node_text or node_text == "" then
+        return nil
+    end
+
+    local cursor_row, cursor_col = node:range()
+    local lang = parser:language_for_range({ cursor_row, cursor_col, cursor_row, cursor_col }):lang()
+    return find_scope(node, lang), node_text, node:type(), cursor_row, cursor_col
+end
+
+--- Collect every reference to the identifier under the cursor within its scope,
+--- across the whole buffer (not just the viewport). Used for navigation, not the
+--- highlight hot path. The cursor's own occurrence is included.
+---@param bufnr number
+---@param winid number
+---@return number[][]? matches Document-ordered {start_row, start_col, end_row, end_col}, 0-indexed
+---@return number? cursor_index 1-based index of the cursor's own occurrence
+function M.references(bufnr, winid)
+    local scope, node_text, node_type, cursor_row, cursor_col = resolve_identifier(bufnr, winid)
+    if not scope then
+        return nil
+    end
+
+    local last_line = vim.api.nvim_buf_line_count(bufnr) - 1
+    local matches = find_matches(scope, node_text, node_type, bufnr, 0, last_line, math.huge)
+    table.sort(matches, function(a, b)
+        if a[1] ~= b[1] then
+            return a[1] < b[1]
+        end
+        return a[2] < b[2]
+    end)
+
+    local cursor_index
+    for i, m in ipairs(matches) do
+        if m[1] == cursor_row and m[2] == cursor_col then
+            cursor_index = i
+            break
+        end
+    end
+
+    return matches, cursor_index
+end
+
 --- Update highlights for the current cursor position.
---- @param bufnr number
---- @param winid number? Window to use for viewport/cache (default: current window)
+---@param bufnr number
+---@param winid number? Window to use for viewport/cache (default: current window)
 function M.update(bufnr, winid)
     winid = winid or vim.api.nvim_get_current_win()
 
     -- Extmarks are buffer-global. If this isn't the focused window, drawing
     -- would clobber highlights derived from the focused window's cursor. Skip
-    -- silently — the cache for `winid` was already invalidated by the caller
+    -- silently: the cache for `winid` was already invalidated by the caller
     -- (e.g., WinScrolled), so re-focusing the window forces a fresh compute.
     if winid ~= vim.api.nvim_get_current_win() then
         return
@@ -281,7 +351,7 @@ function M.update(bufnr, winid)
         return
     end
 
-    -- Root language exclusion — skip parsing entirely for excluded languages.
+    -- Root language exclusion: skip parsing entirely for excluded languages.
     -- Injection-level exclusion happens later after get_node resolves the tree.
     if config._lang_set[parser:lang()] then
         clear_if_active(bufnr)
@@ -403,7 +473,7 @@ function M.update(bufnr, winid)
 end
 
 --- Clear highlights and reset cache for a buffer.
---- @param bufnr number
+---@param bufnr number
 function M.clear(bufnr)
     vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
     for winid, entry in pairs(cache) do
@@ -426,7 +496,7 @@ function M.clear_all()
 end
 
 --- Invalidate cache for a specific window or all windows.
---- @param winid number? Window ID (nil = invalidate all)
+---@param winid number? Window ID (nil = invalidate all)
 function M.invalidate_cache(winid)
     if winid then
         cache[winid] = nil
@@ -436,13 +506,13 @@ function M.invalidate_cache(winid)
 end
 
 --- Clean up state for a closed window.
---- @param winid number
+---@param winid number
 function M.cleanup_window(winid)
     cache[winid] = nil
 end
 
 --- Clean up state for a deleted buffer.
---- @param bufnr number
+---@param bufnr number
 function M.cleanup_buffer(bufnr)
     M.clear(bufnr)
 end

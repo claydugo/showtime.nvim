@@ -1,17 +1,17 @@
 local M = {}
 
---- @class showtime.Config
---- @field delay number Milliseconds before highlighting (0 = immediate)
---- @field hl_group string Highlight group name for references
---- @field max_matches number Safety cap on extmarks per cycle
---- @field min_matches number Minimum references required to highlight
---- @field exclude_languages string[] Treesitter language names to skip
---- @field exclude_buftypes string[] Buffer types to skip
---- @field scope_nodes table<string, table<string, boolean>>? Per-language scope node overrides
---- @field _lang_set table<string, boolean> Internal set for O(1) language lookup
---- @field _bt_set table<string, boolean> Internal set for O(1) buftype lookup
+---@class showtime.Config
+---@field delay number Milliseconds before highlighting (0 = immediate)
+---@field hl_group string Highlight group name for references
+---@field max_matches number Safety cap on extmarks per cycle
+---@field min_matches number Minimum references required to highlight
+---@field exclude_languages string[] Treesitter language names to skip
+---@field exclude_buftypes string[] Buffer types to skip
+---@field scope_nodes table<string, table<string, boolean>>? Per-language scope node overrides
+---@field _lang_set table<string, boolean> Internal set for O(1) language lookup
+---@field _bt_set table<string, boolean> Internal set for O(1) buftype lookup
 
---- @type showtime.Config
+---@type showtime.Config
 local DEFAULTS = {
     delay = 0,
     hl_group = "ShowtimeReference",
@@ -22,8 +22,8 @@ local DEFAULTS = {
 }
 
 --- Build a hash set from an array of strings.
---- @param list string[]
---- @return table<string, boolean>
+---@param list string[]
+---@return table<string, boolean>
 local function to_set(list)
     local s = {}
     for _, v in ipairs(list) do
@@ -51,12 +51,12 @@ local function rebuild_sets()
     M.options._bt_set = to_set(M.options.exclude_buftypes)
 end
 
---- @type showtime.Config
+---@type showtime.Config
 M.options = vim.deepcopy(DEFAULTS)
 rebuild_sets()
 
 --- Merge user options into config with validation.
---- @param user_options showtime.Config?
+---@param user_options showtime.Config?
 function M.setup(user_options)
     if not user_options then
         M.options = vim.deepcopy(DEFAULTS)
@@ -72,7 +72,7 @@ function M.setup(user_options)
         end
     end
 
-    -- Type validation — warn and bail on failure, keeping previous config.
+    -- Type validation: warn and bail on failure, keeping previous config.
     local ok, err = pcall(function()
         vim.validate("delay", user_options.delay, "number", true)
         vim.validate("hl_group", user_options.hl_group, "string", true)
@@ -95,7 +95,7 @@ function M.setup(user_options)
         return
     end
 
-    -- Semantic validation — warn and clamp invalid values.
+    -- Semantic validation: warn and clamp invalid values.
     if user_options.delay and user_options.delay < 0 then
         vim.notify("showtime.setup(): delay must be >= 0, clamping to 0", vim.log.levels.WARN)
         user_options.delay = 0

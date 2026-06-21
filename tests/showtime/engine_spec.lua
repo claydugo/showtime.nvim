@@ -4,10 +4,10 @@ local showtime = require("showtime")
 local ns = vim.api.nvim_create_namespace("showtime")
 
 --- Set up a buffer with the given lines and filetype, focused in the current window.
---- @param lines string[]
---- @param ft string?
---- @return number bufnr
---- @return number winid
+---@param lines string[]
+---@param ft string?
+---@return number bufnr
+---@return number winid
 local function open_buffer(lines, ft)
     ft = ft or "lua"
     local bufnr = vim.api.nvim_create_buf(false, true)
@@ -79,10 +79,8 @@ describe("showtime.engine", function()
         local row, col = find_col(bufnr, 1, "solo")
         vim.api.nvim_win_set_cursor(winid, { row, col })
         engine.update(bufnr, winid)
-        -- One match (the cursor itself) — but cursor is excluded, so still 0 extmarks.
-        -- The point of this test is to verify the engine does not bail at the min_matches check.
-        -- We can't observe "passed the gate" directly, but we can flip to a 2-occurrence buffer
-        -- and verify that with min_matches=1 a single sibling still highlights.
+        -- With a single occurrence the cursor is excluded, so 0 extmarks either way.
+        -- Switch to a 2-occurrence buffer to confirm min_matches=1 highlights a lone sibling.
         engine.clear_all()
         local b2, w2 = open_buffer({ "local x = 1", "print(x)" })
         local r2, c2 = find_col(b2, 1, "x")
@@ -264,7 +262,7 @@ describe("showtime.engine", function()
         vim.api.nvim_win_set_cursor(winid, { row, col })
         engine.update(bufnr, winid)
         -- With for_statement as a scope, only the for-body x's are reachable
-        -- (the x on line 3 and the x on line 4 — cursor excluded → 1 extmark).
+        -- (lines 3 and 4, cursor excluded, so 1 extmark).
         assert.are.equal(1, extmark_count(bufnr))
     end)
 end)

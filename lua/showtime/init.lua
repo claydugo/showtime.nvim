@@ -3,11 +3,11 @@ local M = {}
 local config = require("showtime.config")
 local utils = require("showtime.utils")
 
---- @type boolean
+---@type boolean
 M.enabled = true
 
 --- Public access to the resolved config table.
---- @type showtime.Config
+---@type showtime.Config
 M.config = config.options
 
 --- Timer for CursorMoved debounce.
@@ -22,8 +22,8 @@ local pending_cursor_bufnr, pending_cursor_winid = 0, 0
 local pending_scroll_bufnr, pending_scroll_winid = 0, 0
 
 --- Validate buffer/window are still consistent, then run engine update.
---- @param bufnr number
---- @param winid number
+---@param bufnr number
+---@param winid number
 local function run_update(bufnr, winid)
     if
         vim.api.nvim_buf_is_valid(bufnr)
@@ -44,7 +44,7 @@ end)
 
 --- Merge user options into config and define the default highlight group.
 --- Calling setup() is optional -- the plugin works with defaults.
---- @param opts showtime.Config?
+---@param opts showtime.Config?
 function M.setup(opts)
     config.setup(opts)
     M.config = config.options
@@ -53,8 +53,8 @@ function M.setup(opts)
 end
 
 --- Schedule an engine update with CursorMoved delay.
---- @param bufnr number
---- @param winid number? Window ID (default: current window)
+---@param bufnr number
+---@param winid number? Window ID (default: current window)
 function M.schedule_update(bufnr, winid)
     if not M.enabled then
         return
@@ -72,8 +72,8 @@ function M.schedule_update(bufnr, winid)
 end
 
 --- Schedule an engine update with scroll debounce (delay with 30ms floor).
---- @param bufnr number
---- @param winid number? Window ID (default: current window)
+---@param bufnr number
+---@param winid number? Window ID (default: current window)
 function M.schedule_scroll_update(bufnr, winid)
     if not M.enabled then
         return
@@ -107,9 +107,19 @@ function M.toggle()
     end
 end
 
---- @return boolean
+---@return boolean
 function M.is_enabled()
     return M.enabled
+end
+
+--- Jump to the next reference of the identifier under the cursor, within scope.
+function M.next_reference()
+    require("showtime.nav").next_reference()
+end
+
+--- Jump to the previous reference of the identifier under the cursor, within scope.
+function M.prev_reference()
+    require("showtime.nav").prev_reference()
 end
 
 return M

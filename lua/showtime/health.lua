@@ -1,7 +1,7 @@
 local M = {}
 
 --- Check a highlight group and report its resolved attributes.
---- @param name string
+---@param name string
 local function check_highlight(name)
     local hl = vim.api.nvim_get_hl(0, { name = name })
     if not hl or not next(hl) then
@@ -37,11 +37,9 @@ end
 function M.check()
     vim.health.start("showtime.nvim")
 
-    -- Version
     local version = require("showtime.version")
-    vim.health.info("version: `" .. version .. "`")
+    vim.health.info("{showtime.nvim} version `" .. version .. "`")
 
-    -- Requirements
     if vim.fn.has("nvim-0.11") == 1 then
         vim.health.ok("Neovim >= 0.11")
     else
