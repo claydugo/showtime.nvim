@@ -1,5 +1,5 @@
 *showtime.txt*             Treesitter-powered reference highlighter for Neovim
-                                   For NVIM v0.8.0    Last change: 2026 May 06
+                                  For NVIM v0.8.0    Last change: 2026 June 21
 
 ==============================================================================
 Table of Contents                                 *showtime-table-of-contents*
@@ -10,6 +10,7 @@ Table of Contents                                 *showtime-table-of-contents*
   - Installation                         |showtime-showtime.nvim-installation|
   - Configuration                       |showtime-showtime.nvim-configuration|
   - Commands                                 |showtime-showtime.nvim-commands|
+  - Navigation                             |showtime-showtime.nvim-navigation|
   - How It Works                         |showtime-showtime.nvim-how-it-works|
   - Health Check                         |showtime-showtime.nvim-health-check|
   - License                                   |showtime-showtime.nvim-license|
@@ -17,18 +18,17 @@ Table of Contents                                 *showtime-table-of-contents*
 ==============================================================================
 1. showtime.nvim                                      *showtime-showtime.nvim*
 
-Treesitter-powered reference highlighter for Neovim 0.11+. When your cursor
-sits on an identifier, every other reference to that identifier within its
-containing scope lights up. No external dependencies. No per-language
-configuration.
+Treesitter-powered reference highlighter for Neovim 0.11+. Put your cursor on
+an identifier and every other reference to it within the containing scope
+lights up. No external dependencies, no per-language configuration.
 
 
 FEATURES                                     *showtime-showtime.nvim-features*
 
-- **Scope-aware highlighting**: References are found within the containing function, method, class, or module — not the entire file.
+- **Scope-aware**: References are found within the containing function, method, class, or module, not the whole file.
 - **Treesitter-native**: Works with any language that has a treesitter parser. No per-language setup.
-- **Fast**: Viewport pruning, per-window caching, and iterative DFS make highlighting imperceptible even on large files.
-- **Zero config**: Works out of the box with sensible defaults. `setup()` is optional.
+- **Fast**: Viewport pruning, per-window caching, and an iterative DFS keep highlighting imperceptible on large files.
+- **Zero config**: Sensible defaults out of the box. `setup()` is optional.
 
 
 REQUIREMENTS                             *showtime-showtime.nvim-requirements*
@@ -100,15 +100,15 @@ ADDING A LANGUAGE ~
 
 The plugin ships with scope tables for Lua, Python, JavaScript/TypeScript/TSX,
 Go, Rust, C, C++, and Ruby. For any other language with a treesitter parser, a
-generic fallback kicks in (matching node types containing `_definition`,
-`_declaration`, `module`, etc.) — usually good enough.
+generic fallback matches node types containing `_definition`, `_declaration`,
+`module`, and similar, which is usually good enough.
 
 When the fallback misses or you want different scope boundaries, set
-`scope_nodes`. The table is deep-merged with builtins, so you only need to
-specify what you’re adding or overriding.
+`scope_nodes`. The table is deep-merged with the builtins, so you only specify
+what you’re adding or overriding.
 
-**Adding an unsupported language** — list every node type that should act as
-a scope boundary. Use `:InspectTree` on a sample file to find them.
+**Adding an unsupported language**: list every node type that should act as a
+scope boundary. Use `:InspectTree` on a sample file to find them.
 
 >lua
     require('showtime').setup({
@@ -122,9 +122,9 @@ a scope boundary. Use `:InspectTree` on a sample file to find them.
     })
 <
 
-**Extending a builtin language** — keys you add merge with the existing set.
-Here, Lua keeps its `chunk` / `function_definition` / `do_block` defaults _and_
-now treats `for_statement` as a scope boundary:
+**Extending a builtin language**: keys you add merge with the existing set.
+Here, Lua keeps its `chunk` / `function_definition` / `do_block` defaults and
+also treats `for_statement` as a scope boundary:
 
 >lua
     require('showtime').setup({
@@ -143,8 +143,8 @@ HIGHLIGHT GROUPS ~
   Group                   Default                 Description
   ----------------------- ----------------------- -----------------------
   ShowtimeReference       links to                Applied to all matching
-                          LspReferenceText        references (except the
-                                                  one under cursor)
+                          LspReferenceText        references except the
+                                                  one under the cursor
 
   -----------------------------------------------------------------------
 Override in your colorscheme or config:
@@ -165,18 +165,43 @@ Disable showtime for a specific buffer:
 
 COMMANDS                                     *showtime-showtime.nvim-commands*
 
-  Command            Description
-  ------------------ --------------------------------
-  :ShowtimeEnable    Enable reference highlighting
-  :ShowtimeDisable   Disable reference highlighting
-  :ShowtimeToggle    Toggle reference highlighting
+  Command                  Description
+  ------------------------ -----------------------------------------
+  :ShowtimeEnable          Enable reference highlighting
+  :ShowtimeDisable         Disable reference highlighting
+  :ShowtimeToggle          Toggle reference highlighting
+  :ShowtimeNextReference   Jump to the next reference in scope
+  :ShowtimePrevReference   Jump to the previous reference in scope
+
+NAVIGATION                                 *showtime-showtime.nvim-navigation*
+
+`:ShowtimeNextReference` and `:ShowtimePrevReference` move the cursor between
+the references showtime highlights, staying within the containing scope. Both
+honor a `[count]`, respect `'wrapscan'`, push the jumplist (so `<C-o>`
+returns), and open folds at the destination.
+
+No keymaps are bound by default. Two `<Plug>` mappings are provided so you can
+bind your own:
+
+>lua
+    vim.keymap.set('n', ']r', '<Plug>(showtime-next-reference)')
+    vim.keymap.set('n', '[r', '<Plug>(showtime-prev-reference)')
+<
+
+A Lua API is available too:
+
+>lua
+    require('showtime').next_reference()
+    require('showtime').prev_reference()
+<
+
 
 HOW IT WORKS                             *showtime-showtime.nvim-how-it-works*
 
-1. On `CursorMoved`, the engine checks if the cursor is on a treesitter identifier (leaf node whose type contains "identifier" or "name").
-2. It walks up the tree to find the nearest scope boundary using per-language node type tables (with a generic fallback for unknown languages). Falls back to the tree root.
-3. An iterative DFS traverses the scope, collecting all nodes with the same type and text — but only within the visible viewport.
-4. Matching nodes get highlighted via extmarks. The node under the cursor is excluded.
+1. On `CursorMoved`, the engine checks whether the cursor is on a treesitter identifier (a leaf node whose type contains "identifier" or "name").
+2. It walks up the tree to the nearest scope boundary using per-language node type tables, with a generic fallback for unknown languages, and falls back to the tree root.
+3. An iterative DFS traverses the scope and collects all nodes with the same type and text, but only within the visible viewport.
+4. Matching nodes are highlighted via extmarks. The node under the cursor is excluded.
 5. A per-window cache keyed on buffer, changedtick, node identity, cursor position, scope range, and viewport bounds skips redundant work.
 
 
@@ -187,7 +212,7 @@ Run `:checkhealth showtime` to verify your setup.
 
 LICENSE                                       *showtime-showtime.nvim-license*
 
-MIT — see LICENSE <LICENSE>.
+MIT, see LICENSE <LICENSE>.
 
 Generated by panvimdoc <https://github.com/kdheepak/panvimdoc>
 
