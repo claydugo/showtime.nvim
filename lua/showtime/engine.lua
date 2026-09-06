@@ -1,5 +1,7 @@
 local M = {}
 
+local config = require("showtime.config")
+
 local ns = vim.api.nvim_create_namespace("showtime")
 
 --- Per-language scope boundary node types (exact match).
@@ -113,20 +115,62 @@ local IDENTIFIER_PATTERNS = { "identifier", "name" }
 ---@field node_type string
 ---@field cursor_row number
 ---@field cursor_col number
----@field scope_sr number
----@field scope_sc number
----@field scope_er number
----@field scope_ec number
----@field top number
----@field bot number
+---@field scope TSNode
+---@field position number[]
+---@field ranges number[][]
+---@field key string
+---@field lang string
+---@field matches number[][]
 
 --- Per-window cache, keyed by winid.
 ---@type table<number, showtime.Cache>
 local cache = {}
 
---- Per-buffer tracking of whether extmarks are active.
----@type table<number, boolean>
+--- Per-window results prepared for the decoration provider.
+---@type table<number, showtime.Cache>
 local active = {}
+local navigation_cache = {}
+local requests = {}
+local redraw_pending = false
+local redraw_windows = {}
+
+local function redraw(winid)
+    redraw_windows[winid] = true
+    if redraw_pending then
+        return
+    end
+    redraw_pending = true
+    vim.schedule(function()
+        redraw_pending = false
+        for window in pairs(redraw_windows) do
+            if vim.api.nvim_win_is_valid(window) then
+                vim.api.nvim__redraw({ win = window, valid = false })
+            end
+        end
+        redraw_windows = {}
+        vim.api.nvim__redraw({ flush = true })
+    end)
+end
+
+local function visible_ranges(top, bot)
+    local ranges = {}
+    local row = top
+    while row <= bot do
+        local fold_end = vim.fn.foldclosedend(row + 1)
+        if fold_end == -1 then
+            local range = ranges[#ranges]
+            if range and range[2] == row then
+                range[2] = row + 1
+            else
+                ranges[#ranges + 1] = { row, row + 1 }
+            end
+            row = row + 1
+        else
+            row = fold_end
+        end
+    end
+    return ranges
+end
 
 --- Effective scope node tables (builtins merged with user config).
 ---@type table<string, table<string, boolean>>
@@ -146,8 +190,11 @@ end
 --- Clear highlights for a buffer if it has active extmarks.
 ---@param bufnr number
 local function clear_if_active(bufnr)
-    if active[bufnr] then
-        M.clear(bufnr)
+    for _, entry in pairs(active) do
+        if entry.bufnr == bufnr then
+            M.clear(bufnr)
+            return
+        end
     end
 end
 
@@ -198,71 +245,47 @@ local function find_scope(node, lang)
     return root
 end
 
---- Iterative DFS over scope descendants. Collects matching nodes that
---- overlap the visible viewport. Prunes entire subtrees outside viewport.
+--- Query scope descendants for matching leaves within the requested ranges.
+--- Closed folds do not contribute matches to the highlight budget.
 ---@param scope TSNode
 ---@param text string
 ---@param ntype string
 ---@param bufnr number
----@param top number 0-indexed first visible line
----@param bot number 0-indexed last visible line
+---@param ranges number[][] Visible ranges with exclusive end rows
+---@param lang string Treesitter language name
 ---@param max number
 ---@return number[][] List of {start_row, start_col, end_row, end_col}
-local function find_matches(scope, text, ntype, bufnr, top, bot, max)
+local function find_matches(scope, text, ntype, bufnr, ranges, lang, max)
     local matches = {}
-    local stack = { scope }
+    local query = vim.treesitter.query.parse(lang, "(" .. ntype .. ") @reference")
 
-    while #stack > 0 do
-        local current = stack[#stack]
-        stack[#stack] = nil
-
-        local sr, _, er, _ = current:range()
-
-        -- Prune subtrees entirely outside the viewport.
-        if er >= top and sr <= bot then
-            if current:child_count() == 0 then
-                -- Leaf node: check if it matches.
-                if current:type() == ntype and vim.treesitter.get_node_text(current, bufnr) == text then
-                    local r1, c1, r2, c2 = current:range()
-                    matches[#matches + 1] = { r1, c1, r2, c2 }
-                    if #matches >= max then
-                        return matches
-                    end
-                end
-            else
-                -- Push children in reverse order (LIFO -> first child processed first).
-                local count = current:child_count()
-                for i = count - 1, 0, -1 do
-                    stack[#stack + 1] = current:child(i)
+    -- Limit each query to an unfolded range of the viewport.
+    for _, range in ipairs(ranges) do
+        for _, current in query:iter_captures(scope, bufnr, range[1], range[2]) do
+            -- Leaf node: check if it matches.
+            if current:child_count() == 0 and vim.treesitter.get_node_text(current, bufnr) == text then
+                local r1, c1, r2, c2 = current:range()
+                matches[#matches + 1] = { r1, c1, r2, c2 }
+                if #matches >= max then
+                    return matches
                 end
             end
         end
     end
 
+    -- Query captures preserve document order across ascending visible ranges.
     return matches
 end
 
---- Resolve the identifier under the cursor and its enclosing scope, parsing the
---- whole buffer. Navigation needs matches outside the viewport, so unlike the
---- highlight path this does not prune to visible lines.
+--- Resolve the identifier under the cursor and its enclosing scope from a
+--- parsed language tree. Navigation can collect matches outside the viewport;
+--- highlighting limits collection to unfolded viewport ranges.
 ---@param bufnr number
 ---@param winid number
----@return TSNode? scope
----@return string? node_text
----@return string? node_type
----@return number? cursor_row 0-indexed start row of the cursor's identifier
----@return number? cursor_col 0-indexed start col of the cursor's identifier
-local function resolve_identifier(bufnr, winid)
-    local ok, parser = pcall(vim.treesitter.get_parser, bufnr)
-    if not ok or not parser then
-        return nil
-    end
-    parser:parse(true)
-
+---@return showtime.Cache? context
+local function resolve_identifier(bufnr, winid, parser)
     local cursor = vim.api.nvim_win_get_cursor(winid)
-    local node = vim.treesitter.get_node({
-        bufnr = bufnr,
-        pos = { cursor[1] - 1, cursor[2] },
+    local node = parser:named_node_for_range({ cursor[1] - 1, cursor[2], cursor[1] - 1, cursor[2] }, {
         ignore_injections = false,
     })
     if not node or not is_identifier(node) then
@@ -276,7 +299,19 @@ local function resolve_identifier(bufnr, winid)
 
     local cursor_row, cursor_col = node:range()
     local lang = parser:language_for_range({ cursor_row, cursor_col, cursor_row, cursor_col }):lang()
-    return find_scope(node, lang), node_text, node:type(), cursor_row, cursor_col
+    local scope = find_scope(node, lang)
+    local sr, sc, er, ec = scope:range()
+    return {
+        bufnr = bufnr,
+        position = cursor,
+        scope = scope,
+        node_text = node_text,
+        node_type = node:type(),
+        cursor_row = cursor_row,
+        cursor_col = cursor_col,
+        lang = lang,
+        key = table.concat({ lang, node:type(), node_text, sr, sc, er, ec }, "\0"),
+    }
 end
 
 --- Collect every reference to the identifier under the cursor within its scope,
@@ -287,23 +322,47 @@ end
 ---@return number[][]? matches Document-ordered {start_row, start_col, end_row, end_col}, 0-indexed
 ---@return number? cursor_index 1-based index of the cursor's own occurrence
 function M.references(bufnr, winid)
-    local scope, node_text, node_type, cursor_row, cursor_col = resolve_identifier(bufnr, winid)
-    if not scope then
+    local ok, parser = pcall(vim.treesitter.get_parser, bufnr)
+    if not ok or not parser then
+        return nil
+    end
+    local cursor = vim.api.nvim_win_get_cursor(winid)
+    parser:parse({ cursor[1] - 1, cursor[1] })
+    local context = resolve_identifier(bufnr, winid, parser)
+    if not context then
         return nil
     end
 
-    local last_line = vim.api.nvim_buf_line_count(bufnr) - 1
-    local matches = find_matches(scope, node_text, node_type, bufnr, 0, last_line, math.huge)
-    table.sort(matches, function(a, b)
-        if a[1] ~= b[1] then
-            return a[1] < b[1]
-        end
-        return a[2] < b[2]
-    end)
+    local tick = vim.api.nvim_buf_get_changedtick(bufnr)
+    local previous = navigation_cache[bufnr]
+    local matches
+    if
+        previous
+        and previous.changedtick == tick
+        and previous.revision == config.revision
+        and previous.key == context.key
+    then
+        matches = previous.matches
+    else
+        local last_line = vim.api.nvim_buf_line_count(bufnr)
+        matches = find_matches(
+            context.scope,
+            context.node_text,
+            context.node_type,
+            bufnr,
+            { { 0, last_line } },
+            context.lang,
+            math.huge
+        )
+        context.changedtick = tick
+        context.revision = config.revision
+        context.matches = matches
+        navigation_cache[bufnr] = context
+    end
 
     local cursor_index
     for i, m in ipairs(matches) do
-        if m[1] == cursor_row and m[2] == cursor_col then
+        if m[1] == context.cursor_row and m[2] == context.cursor_col then
             cursor_index = i
             break
         end
@@ -315,33 +374,58 @@ end
 --- Update highlights for the current cursor position.
 ---@param bufnr number
 ---@param winid number? Window to use for viewport/cache (default: current window)
-function M.update(bufnr, winid)
+function M.update(bufnr, winid, options, is_current, on_view_changed)
     winid = winid or vim.api.nvim_get_current_win()
+    options = options or config.options
 
-    -- Extmarks are buffer-global. If this isn't the focused window, drawing
-    -- would clobber highlights derived from the focused window's cursor. Skip
-    -- silently: the cache for `winid` was already invalidated by the caller
-    -- (e.g., WinScrolled), so re-focusing the window forces a fresh compute.
+    -- Only the focused window requests highlighting. The decoration provider
+    -- confines drawing to that window, including buffers shown in multiple
+    -- windows. Deferred results also verify focus before entering the cache.
+    -- Window entry schedules a fresh update for the newly focused window.
     if winid ~= vim.api.nvim_get_current_win() then
         return
     end
 
-    if vim.b[bufnr].showtime_disabled then
-        clear_if_active(bufnr)
+    if
+        not vim.api.nvim_buf_is_loaded(bufnr)
+        or not vim.api.nvim_win_is_valid(winid)
+        or vim.api.nvim_win_get_buf(winid) ~= bufnr
+    then
         return
     end
 
-    local showtime = require("showtime")
-    if not showtime.enabled then
+    if vim.b[bufnr].showtime_disabled or vim.api.nvim_get_mode().mode:match("^[iRt]") then
         clear_if_active(bufnr)
         return
     end
-
-    local config = showtime.config
 
     local bt = vim.bo[bufnr].buftype
-    if config._bt_set[bt] then
+    if options._bt_set[bt] then
         clear_if_active(bufnr)
+        return
+    end
+
+    -- Viewport bounds and cursor position for the target window.
+    local cursor = vim.api.nvim_win_get_cursor(winid) -- {1-indexed row, 0-indexed col}
+    local cursor_pos = { cursor[1] - 1, cursor[2] } -- 0-indexed for treesitter
+    local top = vim.fn.line("w0") - 1
+    local bot = vim.fn.line("w$") - 1
+    local ranges = visible_ranges(top, bot)
+
+    local tick = vim.api.nvim_buf_get_changedtick(bufnr)
+    local revision = config.revision
+    local filetype = vim.bo[bufnr].filetype
+    local c = cache[winid]
+    if
+        c
+        and c.bufnr == bufnr
+        and c.changedtick == tick
+        and c.revision == revision
+        and c.filetype == filetype
+        and vim.deep_equal(c.position, cursor)
+        and vim.deep_equal(c.ranges, ranges)
+    then
+        c.refresh_pending = nil
         return
     end
 
@@ -352,147 +436,136 @@ function M.update(bufnr, winid)
     end
 
     -- Root language exclusion: skip parsing entirely for excluded languages.
-    -- Injection-level exclusion happens later after get_node resolves the tree.
-    if config._lang_set[parser:lang()] then
+    -- Injection-level exclusion follows resolution of the cursor's language tree.
+    if options._lang_set[parser:lang()] then
         clear_if_active(bufnr)
         return
     end
 
-    -- Viewport bounds and cursor position for the target window.
-    local cursor = vim.api.nvim_win_get_cursor(winid) -- {1-indexed row, 0-indexed col}
-    local cursor_pos = { cursor[1] - 1, cursor[2] } -- 0-indexed for treesitter
-    local top = vim.api.nvim_win_call(winid, function()
-        return vim.fn.line("w0") - 1
-    end)
-    local bot = vim.api.nvim_win_call(winid, function()
-        return vim.fn.line("w$") - 1
-    end)
-    parser:parse({ top, bot })
-
-    -- get_node() with explicit pos so deferred updates resolve the correct
-    -- identifier for the target window, not whatever window is current.
-    -- ignore_injections = false lets us get nodes from injected language trees
-    -- (e.g., Lua inside a markdown code fence).
-    local node = vim.treesitter.get_node({
-        bufnr = bufnr,
-        pos = cursor_pos,
-        ignore_injections = false,
-    })
-    if not node then
-        clear_if_active(bufnr)
-        return
-    end
-
-    if not is_identifier(node) then
-        clear_if_active(bufnr)
-        return
-    end
-
-    local node_text = vim.treesitter.get_node_text(node, bufnr)
-    if not node_text or node_text == "" then
-        clear_if_active(bufnr)
-        return
-    end
-    local node_type = node:type()
-    local cursor_row, cursor_col = node:range()
-
-    -- Resolve the active language from the node's range, not the root parser.
-    -- Inside injected regions (e.g., Lua in markdown), parser:lang() returns
-    -- the host language while the node belongs to the injection's LanguageTree.
-    local lang = parser:language_for_range({ cursor_row, cursor_col, cursor_row, cursor_col }):lang()
-
-    -- Language exclusion based on the active tree's language.
-    if config._lang_set[lang] then
-        clear_if_active(bufnr)
-        return
-    end
-
-    local scope = find_scope(node, lang)
-    local sr, sc, er, ec = scope:range()
-
-    local tick = vim.api.nvim_buf_get_changedtick(bufnr)
-    local c = cache[winid]
-    if
-        c
-        and c.bufnr == bufnr
-        and c.changedtick == tick
-        and c.node_text == node_text
-        and c.node_type == node_type
-        and c.cursor_row == cursor_row
-        and c.cursor_col == cursor_col
-        and c.scope_sr == sr
-        and c.scope_sc == sc
-        and c.scope_er == er
-        and c.scope_ec == ec
-        and c.top == top
-        and c.bot == bot
-    then
-        return
-    end
-
-    cache[winid] = {
-        bufnr = bufnr,
-        changedtick = tick,
-        node_text = node_text,
-        node_type = node_type,
-        cursor_row = cursor_row,
-        cursor_col = cursor_col,
-        scope_sr = sr,
-        scope_sc = sc,
-        scope_er = er,
-        scope_ec = ec,
-        top = top,
-        bot = bot,
-    }
-
-    local matches = find_matches(scope, node_text, node_type, bufnr, top, bot, config.max_matches)
-
-    vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
-
-    if #matches < config.min_matches then
-        active[bufnr] = nil
-        return
-    end
-
-    local hl_group = config.hl_group
-
-    for _, m in ipairs(matches) do
-        local is_cursor = m[1] == cursor_row and m[2] == cursor_col
-        if not is_cursor then
-            vim.api.nvim_buf_set_extmark(bufnr, ns, m[1], m[2], {
-                end_row = m[3],
-                end_col = m[4],
-                hl_group = hl_group,
-                priority = 110,
-                strict = false,
-            })
+    local request = { bufnr = bufnr }
+    requests[winid] = request
+    parser:parse({ cursor_pos[1], cursor_pos[1] + 1 }, function(failure, trees)
+        if
+            requests[winid] ~= request
+            or (is_current and not is_current())
+            or not vim.api.nvim_buf_is_loaded(bufnr)
+            or not vim.api.nvim_win_is_valid(winid)
+            or vim.api.nvim_get_current_win() ~= winid
+            or vim.api.nvim_win_get_buf(winid) ~= bufnr
+            or vim.api.nvim_buf_get_changedtick(bufnr) ~= tick
+            or config.revision ~= revision
+            or vim.bo[bufnr].filetype ~= filetype
+            or options._bt_set[vim.bo[bufnr].buftype]
+            or vim.b[bufnr].showtime_disabled
+            or vim.api.nvim_get_mode().mode:match("^[iRt]")
+            or not vim.deep_equal(vim.api.nvim_win_get_cursor(winid), cursor)
+        then
+            return
         end
-    end
+        if
+            vim.fn.line("w0") - 1 ~= top
+            or vim.fn.line("w$") - 1 ~= bot
+            or not vim.deep_equal(visible_ranges(top, bot), ranges)
+        then
+            if on_view_changed then
+                on_view_changed()
+            end
+            return
+        end
+        if failure or not trees then
+            M.clear(bufnr)
+            return
+        end
 
-    active[bufnr] = true
+        -- Resolve the explicit cursor position after parsing its language tree.
+        -- Deferred updates only proceed while that position remains current.
+        -- Injected regions use their own grammar and enclosing syntax scope.
+        -- This also supports Lua identifiers inside Markdown code fences.
+        local context = resolve_identifier(bufnr, winid, parser)
+        if not context then
+            M.clear(bufnr)
+            return
+        end
+
+        -- Resolve the active language from the identifier's range. The root
+        -- parser describes the host language, while the identifier can belong
+        -- to an injected language tree with different scope boundaries.
+        local lang = context.lang
+
+        -- Language exclusion based on the active tree's language.
+        if options._lang_set[lang] then
+            M.clear(bufnr)
+            return
+        end
+
+        local matches
+        if
+            c
+            and c.bufnr == bufnr
+            and c.changedtick == tick
+            and c.revision == revision
+            and c.filetype == filetype
+            and c.key == context.key
+            and vim.deep_equal(c.ranges, ranges)
+        then
+            matches = c.matches
+        else
+            matches = find_matches(
+                context.scope,
+                context.node_text,
+                context.node_type,
+                bufnr,
+                ranges,
+                lang,
+                math.max(options.max_matches + 1, options.min_matches)
+            )
+        end
+        context.changedtick = tick
+        context.revision = revision
+        context.filetype = filetype
+        context.ranges = ranges
+        context.matches = matches
+        context.hl_group = options.hl_group
+        context.max_matches = options.max_matches
+        context.on_view_changed = on_view_changed
+        cache[winid] = context
+        active[winid] = #matches >= options.min_matches and context or nil
+        redraw(winid)
+    end)
 end
 
 --- Clear highlights and reset cache for a buffer.
 ---@param bufnr number
 function M.clear(bufnr)
-    vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
+    for winid, entry in pairs(active) do
+        if entry.bufnr == bufnr then
+            redraw(winid)
+            active[winid] = nil
+        end
+    end
     for winid, entry in pairs(cache) do
         if entry.bufnr == bufnr then
             cache[winid] = nil
+            active[winid] = nil
         end
     end
-    active[bufnr] = nil
+    for winid, request in pairs(requests) do
+        if request.bufnr == bufnr then
+            requests[winid] = nil
+        end
+    end
+    navigation_cache[bufnr] = nil
 end
 
 --- Clear highlights across all loaded buffers.
 function M.clear_all()
-    for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-        if vim.api.nvim_buf_is_loaded(bufnr) then
-            vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
-        end
+    for winid in pairs(active) do
+        redraw(winid)
     end
     cache = {}
     active = {}
+    requests = {}
+    navigation_cache = {}
 end
 
 --- Invalidate cache for a specific window or all windows.
@@ -500,8 +573,10 @@ end
 function M.invalidate_cache(winid)
     if winid then
         cache[winid] = nil
+        requests[winid] = nil
     else
         cache = {}
+        requests = {}
     end
 end
 
@@ -509,6 +584,9 @@ end
 ---@param winid number
 function M.cleanup_window(winid)
     cache[winid] = nil
+    active[winid] = nil
+    requests[winid] = nil
+    redraw(winid)
 end
 
 --- Clean up state for a deleted buffer.
@@ -516,5 +594,56 @@ end
 function M.cleanup_buffer(bufnr)
     M.clear(bufnr)
 end
+
+vim.api.nvim_set_decoration_provider(ns, {
+    on_win = function(_, winid, bufnr)
+        local context = cache[winid]
+        if
+            not context
+            or winid ~= vim.api.nvim_get_current_win()
+            or context.bufnr ~= bufnr
+            or context.changedtick ~= vim.api.nvim_buf_get_changedtick(bufnr)
+            or context.revision ~= config.revision
+            or context.filetype ~= vim.bo[bufnr].filetype
+            or config.options._bt_set[vim.bo[bufnr].buftype]
+            or vim.b[bufnr].showtime_disabled
+            or vim.api.nvim_get_mode().mode:match("^[iRt]")
+        then
+            return false
+        end
+        if not vim.deep_equal(context.ranges, visible_ranges(vim.fn.line("w0") - 1, vim.fn.line("w$") - 1)) then
+            if context.on_view_changed and not context.refresh_pending then
+                context.refresh_pending = true
+                vim.schedule(function()
+                    if cache[winid] == context then
+                        context.on_view_changed()
+                    end
+                end)
+            end
+            return false
+        end
+        if not active[winid] then
+            return false
+        end
+        local count = 0
+        for _, m in ipairs(context.matches) do
+            local is_cursor = m[1] == context.cursor_row and m[2] == context.cursor_col
+            if not is_cursor then
+                vim.api.nvim_buf_set_extmark(bufnr, ns, m[1], m[2], {
+                    end_row = m[3],
+                    end_col = m[4],
+                    hl_group = context.hl_group,
+                    priority = 110,
+                    ephemeral = true,
+                })
+                count = count + 1
+                if count >= context.max_matches then
+                    break
+                end
+            end
+        end
+        return false
+    end,
+})
 
 return M

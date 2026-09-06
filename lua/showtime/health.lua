@@ -3,7 +3,7 @@ local M = {}
 --- Check a highlight group and report its resolved attributes.
 ---@param name string
 local function check_highlight(name)
-    local hl = vim.api.nvim_get_hl(0, { name = name })
+    local hl = vim.api.nvim_get_hl(0, { name = name, link = false, create = false })
     if not hl or not next(hl) then
         vim.health.warn("{" .. name .. "} has no attributes, references may be invisible", {
             'Define it manually: `vim.api.nvim_set_hl(0, "' .. name .. '", { bg = "#2a2a3a" })`',
@@ -12,9 +12,6 @@ local function check_highlight(name)
     end
 
     local attrs = {}
-    if hl.link then
-        attrs[#attrs + 1] = "link=" .. hl.link
-    end
     if hl.bg then
         attrs[#attrs + 1] = string.format("bg=#%06x", hl.bg)
     end
@@ -50,16 +47,24 @@ function M.check()
     end
 
     -- Treesitter
-    local bufnr = vim.api.nvim_get_current_buf()
-    local ft = vim.bo[bufnr].filetype
-    local parser_ok, _ = pcall(vim.treesitter.get_parser, bufnr)
-    if parser_ok then
-        vim.health.ok("treesitter parser available for current buffer (ft: `" .. ft .. "`)")
-    else
-        vim.health.warn("no treesitter parser for current buffer (ft: `" .. ft .. "`)", {
-            "Install a parser: `:TSInstall " .. ft .. "`",
-            "Highlighting will not work in buffers without a parser",
-        })
+    local checked = {}
+    for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+        local ft = vim.bo[bufnr].filetype
+        if vim.api.nvim_buf_is_loaded(bufnr) and vim.bo[bufnr].buftype == "" and ft ~= "" and not checked[ft] then
+            checked[ft] = true
+            local parser_ok, parser = pcall(vim.treesitter.get_parser, bufnr)
+            if parser_ok and parser then
+                vim.health.ok("Parser available for filetype: " .. ft)
+            else
+                vim.health.warn("No parser available for filetype: " .. ft, {
+                    "Install a parser for this filetype",
+                    "Highlighting requires a parser",
+                })
+            end
+        end
+    end
+    if not next(checked) then
+        vim.health.info("Open a source buffer to check parser availability")
     end
 
     -- Configuration

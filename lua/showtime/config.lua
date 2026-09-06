@@ -32,19 +32,6 @@ local function to_set(list)
     return s
 end
 
---- Known config keys for unknown-key detection. Listed explicitly because
---- optional keys (scope_nodes) have no default value and would be missed by
---- iterating DEFAULTS.
-local KNOWN_KEYS = {
-    delay = true,
-    hl_group = true,
-    max_matches = true,
-    min_matches = true,
-    exclude_languages = true,
-    exclude_buftypes = true,
-    scope_nodes = true,
-}
-
 --- Attach derived set fields to the options table.
 local function rebuild_sets()
     M.options._lang_set = to_set(M.options.exclude_languages)
@@ -53,27 +40,17 @@ end
 
 ---@type showtime.Config
 M.options = vim.deepcopy(DEFAULTS)
+M.revision = 0
 rebuild_sets()
 
 --- Merge user options into config with validation.
 ---@param user_options showtime.Config?
 function M.setup(user_options)
-    if not user_options then
-        M.options = vim.deepcopy(DEFAULTS)
-        rebuild_sets()
-        return
-    end
-
-    -- Warn and strip unknown keys (likely typos).
-    for k in pairs(user_options) do
-        if not KNOWN_KEYS[k] then
-            vim.notify("showtime.setup(): unknown option '" .. k .. "' (ignored)", vim.log.levels.WARN)
-            user_options[k] = nil
-        end
-    end
+    user_options = vim.deepcopy(user_options or {})
 
     -- Type validation: warn and bail on failure, keeping previous config.
     local ok, err = pcall(function()
+        vim.validate("options", user_options, "table")
         vim.validate("delay", user_options.delay, "number", true)
         vim.validate("hl_group", user_options.hl_group, "string", true)
         vim.validate("max_matches", user_options.max_matches, "number", true)
@@ -92,7 +69,18 @@ function M.setup(user_options)
     end)
     if not ok then
         vim.notify("showtime.setup(): " .. tostring(err), vim.log.levels.WARN)
-        return
+        return false
+    end
+
+    -- Warn and strip unknown keys (likely typos).
+    --- Known config keys come from defaults. The optional scope_nodes key
+    --- has no default value and requires an explicit check when
+    --- iterating user options.
+    for k in pairs(user_options) do
+        if DEFAULTS[k] == nil and k ~= "scope_nodes" then
+            vim.notify("showtime.setup(): unknown option '" .. k .. "' (ignored)", vim.log.levels.WARN)
+            user_options[k] = nil
+        end
     end
 
     -- Semantic validation: warn and clamp invalid values.
@@ -114,9 +102,17 @@ function M.setup(user_options)
     end
 
     -- Merge from clean defaults.
-    M.options = vim.tbl_extend("force", vim.deepcopy(DEFAULTS), user_options)
+    local options = vim.tbl_extend("force", vim.deepcopy(DEFAULTS), user_options)
+    for key in pairs(M.options) do
+        M.options[key] = nil
+    end
+    for key, value in pairs(options) do
+        M.options[key] = value
+    end
 
     rebuild_sets()
+    M.revision = M.revision + 1
+    return true
 end
 
 return M

@@ -1,4 +1,11 @@
+local provider
+local original_provider = vim.api.nvim_set_decoration_provider
+vim.api.nvim_set_decoration_provider = function(namespace, callbacks)
+    provider = callbacks
+    original_provider(namespace, callbacks)
+end
 local engine = require("showtime.engine")
+vim.api.nvim_set_decoration_provider = original_provider
 local showtime = require("showtime")
 
 local ns = vim.api.nvim_create_namespace("showtime")
@@ -23,8 +30,20 @@ local function open_buffer(lines, ft)
     return bufnr, vim.api.nvim_get_current_win()
 end
 
-local function extmark_count(bufnr)
-    return #vim.api.nvim_buf_get_extmarks(bufnr, ns, 0, -1, {})
+local function extmark_count(bufnr, winid)
+    local marks = {}
+    local original = vim.api.nvim_buf_set_extmark
+    vim.api.nvim_buf_set_extmark = function(buffer, namespace, row, column, options)
+        if buffer == bufnr and namespace == ns then
+            assert.is_true(options.ephemeral)
+            marks[#marks + 1] = { row, column, options }
+        end
+        return 0
+    end
+    local ok, failure = pcall(provider.on_win, "win", winid or vim.api.nvim_get_current_win(), bufnr)
+    vim.api.nvim_buf_set_extmark = original
+    assert(ok, failure)
+    return #marks, marks
 end
 
 --- Find (1-indexed row, 0-indexed col) of the first occurrence of `needle` on the given line.
@@ -114,9 +133,12 @@ describe("showtime.engine", function()
             "local x = 1",
             "print(x, x)",
         })
-        vim.bo[bufnr].buftype = "nofile"
         local row, col = find_col(bufnr, 1, "x")
         vim.api.nvim_win_set_cursor(winid, { row, col })
+        engine.update(bufnr, winid)
+        assert.are.equal(2, extmark_count(bufnr))
+        vim.bo[bufnr].buftype = "nofile"
+        assert.are.equal(0, extmark_count(bufnr))
         engine.update(bufnr, winid)
         assert.are.equal(0, extmark_count(bufnr))
     end)
@@ -155,9 +177,9 @@ describe("showtime.engine", function()
         local row, col = find_col(bufnr, 1, "x")
         vim.api.nvim_win_set_cursor(winid, { row, col })
         engine.update(bufnr, winid)
-        -- find_matches caps internally at 2; one of those 2 may be the cursor (excluded).
+        -- The display budget excludes the cursor occurrence.
         local count = extmark_count(bufnr)
-        assert.is_true(count >= 1 and count <= 2)
+        assert.are.equal(2, count)
     end)
 
     it("clears highlights when the cursor leaves an identifier", function()
@@ -185,13 +207,18 @@ describe("showtime.engine", function()
         engine.update(bufnr, winid)
         assert.is_true(extmark_count(bufnr) > 0)
 
-        -- Manually wipe extmarks without clearing the engine cache.
-        vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
-        assert.are.equal(0, extmark_count(bufnr))
+        -- Fail on parsing without clearing the engine cache.
+        local parser = vim.treesitter.get_parser(bufnr)
+        local original = parser.parse
+        parser.parse = function()
+            error("Unexpected parse")
+        end
 
-        -- A cache hit should return early without re-placing extmarks.
-        engine.update(bufnr, winid)
-        assert.are.equal(0, extmark_count(bufnr))
+        -- A cache hit should return early and reuse prepared decorations.
+        local ok, failure = pcall(engine.update, bufnr, winid)
+        parser.parse = original
+        assert(ok, failure)
+        assert.are.equal(2, extmark_count(bufnr))
     end)
 
     it("invalidates the cache when the buffer changes (changedtick)", function()
@@ -226,6 +253,36 @@ describe("showtime.engine", function()
 
         engine.update(bufnr, winid)
         assert.is_true(extmark_count(bufnr) > 0)
+    end)
+
+    it("refreshes cached matches after the filetype changes", function()
+        local buffer, window = open_buffer({ "local value = 1", "print(value, value)" })
+        vim.api.nvim_win_set_cursor(window, { 1, 6 })
+        engine.update(buffer, window)
+        assert.are.equal(2, extmark_count(buffer))
+        local changedtick = vim.api.nvim_buf_get_changedtick(buffer)
+        vim.bo[buffer].filetype = "c"
+        assert.are.equal(changedtick, vim.api.nvim_buf_get_changedtick(buffer))
+        assert.are.equal(0, extmark_count(buffer))
+        engine.update(buffer, window)
+        assert.are.equal(2, extmark_count(buffer))
+    end)
+
+    it("clears cached matches when the new filetype is excluded or has no parser", function()
+        showtime.setup({ exclude_languages = { "c" } })
+        local buffer, window = open_buffer({ "local value = 1", "print(value, value)" })
+        vim.api.nvim_win_set_cursor(window, { 1, 6 })
+        engine.update(buffer, window)
+        assert.are.equal(2, extmark_count(buffer))
+        vim.bo[buffer].filetype = "c"
+        engine.update(buffer, window)
+        assert.are.equal(0, extmark_count(buffer))
+        vim.bo[buffer].filetype = "lua"
+        engine.update(buffer, window)
+        assert.are.equal(2, extmark_count(buffer))
+        vim.bo[buffer].filetype = "showtime_missing_parser"
+        engine.update(buffer, window)
+        assert.are.equal(0, extmark_count(buffer))
     end)
 
     it("clear() removes extmarks and forgets cache for a buffer", function()
@@ -264,5 +321,166 @@ describe("showtime.engine", function()
         -- With for_statement as a scope, only the for-body x's are reachable
         -- (lines 3 and 4, cursor excluded, so 1 extmark).
         assert.are.equal(1, extmark_count(bufnr))
+    end)
+
+    it("reuses matches between occurrences of the same identifier", function()
+        local bufnr, winid = open_buffer({ "local value = 1", "print(value, value)" })
+        vim.api.nvim_win_set_cursor(winid, { 1, 6 })
+        engine.update(bufnr, winid)
+        local original = vim.treesitter.query.parse
+        vim.treesitter.query.parse = function()
+            error("Unexpected query")
+        end
+        vim.api.nvim_win_set_cursor(winid, { 2, 6 })
+        local ok, failure = pcall(engine.update, bufnr, winid)
+        vim.treesitter.query.parse = original
+        assert(ok, failure)
+        local count, marks = extmark_count(bufnr)
+        assert.are.equal(2, count)
+        assert.are.same({ 0, 6 }, { marks[1][1], marks[1][2] })
+        assert.are.same({ 1, 13 }, { marks[2][1], marks[2][2] })
+    end)
+
+    it("applies configuration changes without cursor movement", function()
+        local bufnr, winid = open_buffer({ "local value = 1", "print(value, value)" })
+        vim.api.nvim_win_set_cursor(winid, { 1, 6 })
+        engine.update(bufnr, winid)
+        showtime.setup({ hl_group = "UpdatedReference" })
+        local count, marks = extmark_count(bufnr)
+        assert.are.equal(2, count)
+        assert.are.equal("UpdatedReference", marks[1][3].hl_group)
+        showtime.setup({ min_matches = 4 })
+        assert.are.equal(0, extmark_count(bufnr))
+    end)
+
+    it("reserves the display budget for unfolded references", function()
+        local lines = { "local value = 1" }
+        for index = 2, 2000 do
+            lines[index] = "print(value)"
+        end
+        lines[2001] = "print(value, value)"
+        local bufnr, winid = open_buffer(lines)
+        vim.wo.foldmethod = "manual"
+        vim.cmd("2,2000fold")
+        vim.api.nvim_win_set_cursor(winid, { 1, 6 })
+        vim.cmd("redraw")
+        engine.update(bufnr, winid)
+        local count, marks = extmark_count(bufnr)
+        assert.are.equal(2, count)
+        assert.are.equal(2000, marks[1][1])
+        assert.are.equal(2000, marks[2][1])
+        vim.cmd("normal! zE")
+    end)
+
+    it("does not draw in another window showing the same buffer", function()
+        local bufnr, winid = open_buffer({ "local value = 1", "print(value, value)" })
+        vim.cmd("vsplit")
+        local other_window = vim.api.nvim_get_current_win()
+        vim.api.nvim_set_current_win(winid)
+        vim.api.nvim_win_set_cursor(winid, { 1, 6 })
+        engine.update(bufnr, winid)
+        assert.are.equal(2, extmark_count(bufnr, winid))
+        assert.are.equal(0, extmark_count(bufnr, other_window))
+        vim.api.nvim_win_close(other_window, true)
+    end)
+
+    it("ignores parser results after cancellation", function()
+        local bufnr, winid = open_buffer({ "local value = 1", "print(value, value)" })
+        vim.api.nvim_win_set_cursor(winid, { 1, 6 })
+        local parser = vim.treesitter.get_parser(bufnr)
+        local original = parser.parse
+        local trees = parser:parse(true)
+        local callback
+        parser.parse = function(_, _, on_parse)
+            callback = on_parse
+        end
+        engine.update(bufnr, winid)
+        parser.parse = original
+        assert.is_function(callback)
+        engine.clear(bufnr)
+        callback(nil, trees)
+        assert.are.equal(0, extmark_count(bufnr))
+    end)
+
+    it("ignores parser results after the cursor moves", function()
+        local bufnr, winid = open_buffer({ "local value = 1", "print(value, value)" })
+        vim.api.nvim_win_set_cursor(winid, { 1, 6 })
+        local parser = vim.treesitter.get_parser(bufnr)
+        local original = parser.parse
+        local trees = parser:parse(true)
+        local callback
+        parser.parse = function(_, _, on_parse)
+            callback = on_parse
+        end
+        engine.update(bufnr, winid)
+        parser.parse = original
+        vim.api.nvim_win_set_cursor(winid, { 1, 0 })
+        callback(nil, trees)
+        assert.are.equal(0, extmark_count(bufnr))
+    end)
+
+    it("discards parser results when the filetype changes during parsing", function()
+        local buffer, window = open_buffer({ "local value = 1", "print(value, value)" })
+        vim.api.nvim_win_set_cursor(window, { 1, 6 })
+        local parser = vim.treesitter.get_parser(buffer)
+        local trees = parser:parse(true)
+        local original = parser.parse
+        local callback
+        parser.parse = function(_, _, on_parse)
+            callback = on_parse
+        end
+        engine.update(buffer, window)
+        parser.parse = original
+        assert.is_function(callback)
+        vim.bo[buffer].filetype = "c"
+        callback(nil, trees)
+        assert.are.equal(0, extmark_count(buffer))
+        vim.bo[buffer].filetype = "lua"
+        assert.are.equal(0, extmark_count(buffer))
+        engine.update(buffer, window)
+        assert.are.equal(2, extmark_count(buffer))
+    end)
+
+    it("discards parser results when the buffer becomes excluded during parsing", function()
+        local buffer, window = open_buffer({ "local value = 1", "print(value, value)" })
+        vim.api.nvim_win_set_cursor(window, { 1, 6 })
+        local parser = vim.treesitter.get_parser(buffer)
+        local trees = parser:parse(true)
+        local original = parser.parse
+        local callback
+        parser.parse = function(_, _, on_parse)
+            callback = on_parse
+        end
+        engine.update(buffer, window)
+        parser.parse = original
+        assert.is_function(callback)
+        vim.bo[buffer].buftype = "nofile"
+        callback(nil, trees)
+        assert.are.equal(0, extmark_count(buffer))
+        vim.bo[buffer].buftype = ""
+        assert.are.equal(0, extmark_count(buffer))
+        engine.update(buffer, window)
+        assert.are.equal(2, extmark_count(buffer))
+    end)
+
+    it("highlights injected Lua identifiers", function()
+        local bufnr, winid = open_buffer({ "```lua", "local value = 1", "print(value)", "```" }, "markdown")
+        vim.api.nvim_win_set_cursor(winid, { 2, 6 })
+        engine.update(bufnr, winid)
+        assert.is_true(vim.wait(1000, function()
+            return extmark_count(bufnr) == 1
+        end))
+        local _, marks = extmark_count(bufnr)
+        assert.are.same({ 2, 6 }, { marks[1][1], marks[1][2] })
+    end)
+
+    it("uses byte columns after UTF-8 text", function()
+        local bufnr, winid = open_buffer({ "local value = 1", 'print("µ", value)' })
+        vim.api.nvim_win_set_cursor(winid, { 1, 6 })
+        engine.update(bufnr, winid)
+        local count, marks = extmark_count(bufnr)
+        assert.are.equal(1, count)
+        assert.are.equal(12, marks[1][2])
+        assert.are.equal(17, marks[1][3].end_col)
     end)
 end)

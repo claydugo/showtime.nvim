@@ -6,7 +6,7 @@ Treesitter-powered reference highlighter for Neovim 0.11+. Put your cursor on an
 
 - **Scope-aware**: References are found within the containing function, method, class, or module, not the whole file.
 - **Treesitter-native**: Works with any language that has a treesitter parser. No per-language setup.
-- **Fast**: Viewport pruning, per-window caching, and an iterative DFS keep highlighting imperceptible on large files.
+- **Fast**: Queries limit matching to unfolded viewport ranges. Cached matches support movement between occurrences. Highlighting parses asynchronously.
 - **Zero config**: Sensible defaults out of the box. `setup()` is optional.
 
 ## Requirements
@@ -56,7 +56,7 @@ require('showtime').setup({
     hl_group = 'ShowtimeReference',
     --- Safety cap on extmarks per update cycle.
     max_matches = 500,
-    --- Minimum references required before highlighting activates.
+    --- Minimum visible references required before highlighting activates.
     --- The cursor's own occurrence counts, so the default of 2 means
     --- "highlight only when there is at least one other occurrence."
     --- An identifier with no siblings stays unhighlighted.
@@ -70,6 +70,12 @@ require('showtime').setup({
     scope_nodes = nil,
 })
 ```
+
+`max_matches` limits displayed references and excludes the cursor occurrence. Closed folds do not consume this budget.
+`min_matches` counts occurrences within unfolded viewport ranges, including the cursor occurrence.
+
+Highlighting appears only in the focused window. Repeated `setup()` calls replace the configuration and refresh highlights.
+Setup copies supplied tables before validation. Later changes to those tables do not change the resolved configuration.
 
 ### Adding a Language
 
@@ -135,7 +141,9 @@ vim.b.showtime_disabled = true
 
 ## Navigation
 
-`:ShowtimeNextReference` and `:ShowtimePrevReference` move the cursor between the references showtime highlights, staying within the containing scope. Both honor a `[count]`, respect `'wrapscan'`, push the jumplist (so `<C-o>` returns), and open folds at the destination.
+`:ShowtimeNextReference` and `:ShowtimePrevReference` move between occurrences within the containing scope, including positions outside the viewport.
+Both accept a count, respect `'wrapscan'`, and open destination folds. Successful jumps enter the jumplist, so `<C-o>` returns.
+For example, `:2ShowtimeNextReference` moves forward two occurrences.
 
 No keymaps are bound by default. Two `<Plug>` mappings are provided so you can bind your own:
 
@@ -151,17 +159,29 @@ require('showtime').next_reference()
 require('showtime').prev_reference()
 ```
 
+Both functions accept an optional count. Navigation remains available after you disable highlighting.
+
+Matching uses identical text and node types within the nearest syntax scope. It does not resolve variable bindings.
+Nested declarations can therefore match an outer variable with the same spelling.
+A function declaration belongs to its own syntax scope. Selecting its name can omit calls outside that declaration.
+Selecting an external call uses that call's containing scope.
+
 ## How It Works
 
 1. On `CursorMoved`, the engine checks whether the cursor is on a treesitter identifier (a leaf node whose type contains "identifier" or "name").
 2. It walks up the tree to the nearest scope boundary using per-language node type tables, with a generic fallback for unknown languages, and falls back to the tree root.
-3. An iterative DFS traverses the scope and collects all nodes with the same type and text, but only within the visible viewport.
-4. Matching nodes are highlighted via extmarks. The node under the cursor is excluded.
-5. A per-window cache keyed on buffer, changedtick, node identity, cursor position, scope range, and viewport bounds skips redundant work.
+3. A query collects leaves with the same type and text within unfolded viewport ranges.
+4. A decoration provider draws ephemeral extmarks in the focused window. It excludes the cursor occurrence.
+5. A window cache tracks buffer changes, configuration changes, the selected identifier, its scope, and visible ranges.
+
+Cursor movement, window entry, Insert exit, and text changes request updates. Leave events and Insert entry cancel pending work.
+Parser callbacks discard results when the buffer, cursor, window, or configuration changes.
+Navigation caches complete scope results separately from visible matches.
 
 ## Health Check
 
 Run `:checkhealth showtime` to verify your setup.
+The report checks parsers for loaded source buffers and resolves highlight links.
 
 ## License
 

@@ -17,13 +17,13 @@ vim.api.nvim_create_user_command("ShowtimeToggle", function()
     require("showtime").toggle()
 end, { desc = "Toggle showtime reference highlighting" })
 
-vim.api.nvim_create_user_command("ShowtimeNextReference", function()
-    require("showtime").next_reference()
-end, { desc = "Jump to the next reference in scope" })
+vim.api.nvim_create_user_command("ShowtimeNextReference", function(args)
+    require("showtime").next_reference(args.count)
+end, { count = 1, desc = "Jump to the next reference in scope" })
 
-vim.api.nvim_create_user_command("ShowtimePrevReference", function()
-    require("showtime").prev_reference()
-end, { desc = "Jump to the previous reference in scope" })
+vim.api.nvim_create_user_command("ShowtimePrevReference", function(args)
+    require("showtime").prev_reference(args.count)
+end, { count = 1, desc = "Jump to the previous reference in scope" })
 
 -- No default keymaps. Bind these <Plug> mappings yourself if you want motions.
 vim.keymap.set("n", "<Plug>(showtime-next-reference)", function()
@@ -36,7 +36,7 @@ end, { desc = "Jump to the previous reference in scope" })
 
 local group = vim.api.nvim_create_augroup("showtime", { clear = true })
 
-vim.api.nvim_create_autocmd("CursorMoved", {
+vim.api.nvim_create_autocmd({ "CursorMoved", "BufWinEnter", "WinEnter", "InsertLeave", "TextChanged", "FileType" }, {
     group = group,
     callback = function(args)
         local winid = vim.api.nvim_get_current_win()
@@ -48,8 +48,8 @@ vim.api.nvim_create_autocmd("WinScrolled", {
     group = group,
     callback = function(args)
         -- args.match is the first scrolled/resized window id (may differ from current window).
-        local winid = tonumber(args.match)
-        if not winid or not vim.api.nvim_win_is_valid(winid) then
+        local winid = vim.api.nvim_get_current_win()
+        if not vim.v.event[tostring(winid)] and tonumber(args.match) ~= winid then
             return
         end
         local bufnr = vim.api.nvim_win_get_buf(winid)
@@ -61,6 +61,7 @@ vim.api.nvim_create_autocmd("WinScrolled", {
 vim.api.nvim_create_autocmd({ "BufLeave", "WinLeave", "InsertEnter" }, {
     group = group,
     callback = function(args)
+        require("showtime").cancel()
         require("showtime.engine").clear(args.buf)
     end,
 })
@@ -89,3 +90,5 @@ vim.api.nvim_create_autocmd("ColorScheme", {
         vim.api.nvim_set_hl(0, config.hl_group, { default = true, link = "LspReferenceText" })
     end,
 })
+
+require("showtime").schedule_update(vim.api.nvim_get_current_buf())

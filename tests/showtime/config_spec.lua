@@ -46,6 +46,27 @@ describe("showtime.config", function()
     end)
 
     describe("merge", function()
+        it("copies supplied tables and preserves the resolved options object", function()
+            local options = config.options
+            local supplied = {
+                delay = -1,
+                unknown = true,
+                exclude_languages = { "c" },
+                scope_nodes = { lua = { for_statement = true } },
+            }
+            with_captured_notify(function()
+                config.setup(supplied)
+            end)
+            assert.are.equal(-1, supplied.delay)
+            assert.is_true(supplied.unknown)
+            supplied.exclude_languages[1] = "lua"
+            supplied.scope_nodes.lua.for_statement = false
+            assert.are.same({ "c" }, config.options.exclude_languages)
+            assert.is_true(config.options._lang_set.c)
+            assert.is_true(config.options.scope_nodes.lua.for_statement)
+            assert.is_true(options == config.options)
+        end)
+
         it("merges partial opts on top of defaults", function()
             config.setup({ delay = 200 })
             assert.are.equal(200, config.options.delay)
