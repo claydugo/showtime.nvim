@@ -1,5 +1,5 @@
 *showtime.txt*             Treesitter-powered reference highlighter for Neovim
-                                  For NVIM v0.11.0    Last change: 2026 Sep 06
+                             For NVIM v0.8.0    Last change: 2026 September 06
 
 ==============================================================================
 Table of Contents                                 *showtime-table-of-contents*
@@ -95,14 +95,15 @@ All options and their defaults:
     })
 <
 
-
 `max_matches` limits displayed references and excludes the cursor occurrence.
 Closed folds do not consume this budget. `min_matches` counts occurrences
 within unfolded viewport ranges, including the cursor occurrence.
-Highlighting appears only in the focused window.
-Repeated `setup()` calls replace the configuration and refresh highlights.
-Setup copies supplied tables before validation.
-Later changes to those tables do not change the resolved configuration.
+
+Highlighting appears only in the focused window. Repeated `setup()` calls
+replace the configuration and refresh highlights. Setup copies supplied tables
+before validation. Later changes to those tables do not change the resolved
+configuration.
+
 
 ADDING A LANGUAGE ~
 
@@ -178,37 +179,41 @@ COMMANDS                                     *showtime-showtime.nvim-commands*
   :ShowtimeEnable          Enable reference highlighting
   :ShowtimeDisable         Disable reference highlighting
   :ShowtimeToggle          Toggle reference highlighting
-  :ShowtimeNextReference   Jump to the next occurrence in scope
-  :ShowtimePrevReference   Jump to the previous occurrence in scope
+  :ShowtimeNextReference   Jump to the next reference in scope
+  :ShowtimePrevReference   Jump to the previous reference in scope
 
 NAVIGATION                                 *showtime-showtime.nvim-navigation*
 
-Navigation includes positions outside the viewport. Both commands accept a
-count, respect 'wrapscan', and open destination folds.
-Successful jumps enter the jumplist, so CTRL-O returns.
-For example, `:2ShowtimeNextReference` moves forward two occurrences.
+`:ShowtimeNextReference` and `:ShowtimePrevReference` move between occurrences
+within the containing scope, including positions outside the viewport. Both
+accept a count, respect `'wrapscan'`, and open destination folds. Successful
+jumps enter the jumplist, so `<C-o>` returns. For example,
+`:2ShowtimeNextReference` moves forward two occurrences.
 
-No keymaps are bound by default. Bind the <Plug> mappings as follows:
+No keymaps are bound by default. Two `<Plug>` mappings are provided so you can
+bind your own:
 
 >lua
     vim.keymap.set('n', ']r', '<Plug>(showtime-next-reference)')
     vim.keymap.set('n', '[r', '<Plug>(showtime-prev-reference)')
 <
 
-The Lua functions accept an optional count:
+A Lua API is available too:
 
 >lua
-    require('showtime').next_reference(2)
-    require('showtime').prev_reference(2)
+    require('showtime').next_reference()
+    require('showtime').prev_reference()
 <
 
-Navigation remains available when highlighting is disabled.
-Matching uses identical text and node types within the nearest syntax scope.
-It does not resolve variable bindings.
-Nested declarations can match an outer variable with the same spelling.
-A function declaration belongs to its own syntax scope.
-Selecting its name can omit calls outside that declaration.
-Selecting an external call uses that call's containing scope.
+Both functions accept an optional count. Navigation remains available after you
+disable highlighting.
+
+Matching uses identical text and node types within the nearest syntax scope. It
+does not resolve variable bindings. Nested declarations can therefore match an
+outer variable with the same spelling. A function declaration belongs to its
+own syntax scope. Selecting its name can omit calls outside that declaration.
+Selecting an external call uses that call’s containing scope.
+
 
 HOW IT WORKS                             *showtime-showtime.nvim-how-it-works*
 
@@ -219,16 +224,15 @@ HOW IT WORKS                             *showtime-showtime.nvim-how-it-works*
 5. A window cache tracks buffer changes, configuration changes, the selected identifier, its scope, and visible ranges.
 
 Cursor movement, window entry, Insert exit, and text changes request updates.
-Leave events and Insert entry cancel pending work.
-Parser callbacks discard results when the buffer, cursor, window, or
-configuration changes. Navigation caches complete scope results separately
-from visible matches.
+Leave events and Insert entry cancel pending work. Parser callbacks discard
+results when the buffer, cursor, window, or configuration changes. Navigation
+caches complete scope results separately from visible matches.
 
 
 HEALTH CHECK                             *showtime-showtime.nvim-health-check*
 
-Run `:checkhealth showtime` to verify your setup.
-The report checks parsers for loaded source buffers and resolves highlight links.
+Run `:checkhealth showtime` to verify your setup. The report checks parsers for
+loaded source buffers and resolves highlight links.
 
 
 LICENSE                                       *showtime-showtime.nvim-license*
