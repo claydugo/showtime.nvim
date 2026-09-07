@@ -1,5 +1,5 @@
 *showtime.txt*             Treesitter-powered reference highlighter for Neovim
-                             For NVIM v0.8.0    Last change: 2026 September 06
+                             For NVIM v0.8.0    Last change: 2026 September 07
 
 ==============================================================================
 Table of Contents                                 *showtime-table-of-contents*
@@ -18,15 +18,15 @@ Table of Contents                                 *showtime-table-of-contents*
 ==============================================================================
 1. showtime.nvim                                      *showtime-showtime.nvim*
 
-Treesitter-powered reference highlighter for Neovim 0.11+. Put your cursor on
-an identifier and every other reference to it within the containing scope
-lights up. No external dependencies, no per-language configuration.
+Treesitter-powered reference highlighting for Neovim 0.11+. Showtime highlights
+matching identifiers within the visible, unfolded part of the current syntax
+scope. It uses Neovim’s Tree-sitter APIs and needs no additional plugins.
 
 
 FEATURES                                     *showtime-showtime.nvim-features*
 
-- **Scope-aware**: References are found within the containing function, method, class, or module, not the whole file.
-- **Treesitter-native**: Works with any language that has a treesitter parser. No per-language setup.
+- **Scope-aware**: Matches stay within the nearest syntax scope, such as a function, class, or module.
+- **Treesitter-native**: Uses installed parsers and shared identifier heuristics. Matching depends on the grammar’s identifier node types.
 - **Fast**: Queries limit matching to unfolded viewport ranges. Cached matches support movement between occurrences. Highlighting parses asynchronously.
 - **Zero config**: Sensible defaults out of the box. `setup()` is optional.
 
@@ -34,7 +34,12 @@ FEATURES                                     *showtime-showtime.nvim-features*
 REQUIREMENTS                             *showtime-showtime.nvim-requirements*
 
 - Neovim >= 0.11
-- A treesitter parser for the language you’re editing (`:TSInstall <lang>`)
+- A Tree-sitter parser for the language you edit
+
+Neovim includes parsers for some languages. Use the |parser installation
+instructions| for other languages. If you use nvim-treesitter
+<https://github.com/nvim-treesitter/nvim-treesitter>, its `:TSInstall <lang>`
+command installs parsers. Check the plugin’s Neovim version requirements.
 
 
 INSTALLATION                             *showtime-showtime.nvim-installation*
@@ -85,7 +90,7 @@ All options and their defaults:
         --- "highlight only when there is at least one other occurrence."
         --- An identifier with no siblings stays unhighlighted.
         min_matches = 2,
-        --- Treesitter languages to skip (e.g., { 'markdown', 'help' }).
+        --- Treesitter languages to skip (e.g., { 'markdown', 'vimdoc' }).
         exclude_languages = {},
         --- Buffer types to skip.
         exclude_buftypes = { 'nofile', 'terminal', 'prompt' },
@@ -98,6 +103,9 @@ All options and their defaults:
 `max_matches` limits displayed references and excludes the cursor occurrence.
 Closed folds do not consume this budget. `min_matches` counts occurrences
 within unfolded viewport ranges, including the cursor occurrence.
+
+`delay` debounces cursor updates. Scroll updates use a minimum delay of 30 ms.
+Parser completion can outlast the configured delay.
 
 Highlighting appears only in the focused window. Repeated `setup()` calls
 replace the configuration and refresh highlights. Setup copies supplied tables
@@ -115,6 +123,10 @@ generic fallback matches node types containing `_definition`, `_declaration`,
 When the fallback misses or you want different scope boundaries, set
 `scope_nodes`. The table is deep-merged with the builtins, so you only specify
 what you’re adding or overriding.
+
+For a language without built-in scopes, providing `scope_nodes` replaces the
+generic fallback. Set an existing node entry to `false` to remove that scope
+boundary.
 
 **Adding an unsupported language**: list every node type that should act as a
 scope boundary. Use `:InspectTree` on a sample file to find them.
@@ -165,7 +177,7 @@ Override in your colorscheme or config:
 
 PER-BUFFER DISABLE ~
 
-Disable showtime for a specific buffer:
+Disable highlighting for a specific buffer:
 
 >lua
     vim.b.showtime_disabled = true
@@ -206,7 +218,8 @@ A Lua API is available too:
 <
 
 Both functions accept an optional count. Navigation remains available after you
-disable highlighting.
+disable highlighting. Highlight limits and exclusions do not restrict
+navigation.
 
 Matching uses identical text and node types within the nearest syntax scope. It
 does not resolve variable bindings. Nested declarations can therefore match an
@@ -217,15 +230,21 @@ Selecting an external call uses that call’s containing scope.
 
 HOW IT WORKS                             *showtime-showtime.nvim-how-it-works*
 
-1. On `CursorMoved`, the engine checks whether the cursor is on a treesitter identifier (a leaf node whose type contains "identifier" or "name").
-2. It walks up the tree to the nearest scope boundary using per-language node type tables, with a generic fallback for unknown languages, and falls back to the tree root.
+1. The engine requests an asynchronous parse and selects the leaf node under the cursor.
+2. It accepts node types containing `identifier` or `name` and finds the nearest scope boundary.
 3. A query collects leaves with the same type and text within unfolded viewport ranges.
 4. A decoration provider draws ephemeral extmarks in the focused window. It excludes the cursor occurrence.
-5. A window cache tracks buffer changes, configuration changes, the selected identifier, its scope, and visible ranges.
+5. A window cache tracks buffer edits, filetype, configuration, the selected identifier, its scope, and visible ranges.
 
-Cursor movement, window entry, Insert exit, and text changes request updates.
-Leave events and Insert entry cancel pending work. Parser callbacks discard
-results when the buffer, cursor, window, or configuration changes. Navigation
+Languages without scope tables use generic rules. Without a matching boundary,
+the engine uses the tree root.
+
+Cursor movement, window entry, Insert exit, text edits, and filetype changes
+request updates. Scrolling and fold changes refresh visible matches. Leave
+events and Insert entry cancel pending work.
+
+Parser callbacks discard results when the buffer, cursor, filetype, window, or
+configuration changes. Callbacks also recheck buffer exclusions. Navigation
 caches complete scope results separately from visible matches.
 
 
